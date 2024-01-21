@@ -1,6 +1,8 @@
 import os
 from os.path import exists
 from pathlib import Path
+import threading
+import time
 import uuid
 from pokered_env import PokeRedEnv
 #from tensorboard_callback import TensorboardCallback
@@ -13,101 +15,185 @@ from basic_flee_agent import BasicFleeAgent
 
 #from ppo import PPO
 import ppo
+from rollout import *
+
+from emulator import *
 
 import torch
+import torch.nn as nn
+import torch.optim as optim
 
-def make_env(rank, env_conf, seed=0):
-    """
-    Utility function for multiprocessed env.
-    :param env_id: (str) the environment ID
-    :param num_env: (int) the number of environments you wish to have in subprocesses
-    :param seed: (int) the initial seed for RNG
-    :param rank: (int) index of the subprocess
-    """
-    def _init():
-        env = PokeRedEnv(env_conf)
-        env.reset(seed=(seed + rank))
-        return env
-    set_random_seed(seed)
-    return _init
+def gen(env):
+    for i in range(200):
+        actions = {'default': MOVEMENT_ACTION_SPACE.sample()}
+        env.step(actions)
 
 if __name__ == '__main__':
+    torch.set_default_device('cuda') 
 
-
-    use_wandb_logging = False
-    ep_length = 2048 * 10
     sess_id = str(uuid.uuid4())[:8]
     sess_path = Path(f'session_{sess_id}')
+    sess_path.mkdir(exist_ok=True)
     
-    ## Absolutely dumb stupid pathing I have to do because HEAVEN FORBID I CAN JUST RUN MY PROGRAM IN A NORMAL FOLDER ##
-    ## Note to all other developers, don't do this complete and total garbage ##
-    folder = os.getcwd()
+    states_path = Path('states')
+    states_path.mkdir(exist_ok=True)
     
-    env_config = {
-                'headless': True,
-                'action_freq': 24, 'init_state': f'{folder}/has_pokedex_nballs.state', 'max_steps': ep_length, 
-                'print_rewards': True, 'save_video': False, 'fast_video': True, 'session_path': sess_path,
-                'gb_path': f'{folder}/PokemonRed.gb', 'debug': False, 'sim_frame_dist': 2_000_000.0, 
-                'use_screen_explore': True, 'reward_scale': 4, 'extra_buttons': False,
-                'explore_weight': 3 # 2.5
-            }
+    gb_path = './PokemonRed.gb'
+    init_state = './has_pokedex_nballs.state'
+    #init_state = 'states/11_5_0-0.state'
     
-    print(env_config)
+    main_emulator = Emulator(sess_path, gb_path, instance_id='main', headless=True)
+    main_emulator2 = Emulator(sess_path, gb_path, instance_id='main', headless=True)
+    main_emulator3 = Emulator(sess_path, gb_path, instance_id='main', headless=True)
+    main_env = PokeRedEnv(main_emulator, [init_state])
+    main_env2 = PokeRedEnv(main_emulator2, [init_state])
+    main_env3 = PokeRedEnv(main_emulator3, [init_state])
     
-    num_cpu = 8  # Also sets the number of episodes per training iteration
-    #env = SubprocVecEnv([make_env(i, env_config) for i in range(num_cpu)])
-    env = PokeRedEnv(env_config)
-    #obs, infos = env.reset(42, {})
+    flee_policy = ppo.Policy([], SIMPLE_ACTION_SPACE)
+    flee_agent = BasicFleeAgent('flee_agent', SIMPLE_ACTION_SPACE)
     
-    #x = torch.Tensor(obs['explore_low_agent'])
+    explore_low_policy = ppo.Policy([], MOVEMENT_ACTION_SPACE)
+    explore_agent = ExploreLowAgent('explore_low_agent', MOVEMENT_ACTION_SPACE, 0)
     
-    #checkpoint_callback = CheckpointCallback(save_freq=ep_length, save_path=sess_path, name_prefix='poke')
     
-    callbacks = []#[checkpoint_callback]#, TensorboardCallback()]
+    main_env.register_agent(flee_agent)
+    main_env.register_agent(explore_agent)
+    main_env.initial_agent('explore_low_agent')
+    
+    main_env2.register_agent(flee_agent)
+    main_env2.register_agent(explore_agent)
+    main_env2.initial_agent('explore_low_agent')
+    
+    main_env3.register_agent(flee_agent)
+    main_env3.register_agent(explore_agent)
+    main_env3.initial_agent('explore_low_agent')
+    
+    policies = {'explore_low_agent': explore_low_policy, 'flee_agent': flee_policy}
 
-    #env_checker.check_env(env)
-    learn_steps = 40
-    # put a checkpoint here you want to start from
-    file_name = 'session_43b4837c/poke_327680_steps' 
+
+    #ppo.train(policies, env)
     
-    # Literally every single supersuit wrapper doesn't work, wow
-    env = env
-    #env = ss.max_observation_v0(env, 2)
-    #env = ss.frame_skip_v0(env, 4)
-    #env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-    #env = ss.color_reduction_v0(env, mode="B")
-    #env = ss.resize_v1(env, x_size=84, y_size=84)
-    #env = ss.frame_stack_v1(env, 4)
-    #env = ss.agent_indicator_v0(env, type_only=False)
-    #env = ss.pettingzoo_env_to_vec_env_v1(env)
-    #envs = ss.concat_vec_envs_v1(env, 16 // 2, num_cpus=0, base_class="gym")
-    #envs.single_observation_space = envs.observation_space
-    #envs.single_action_space = envs.action_space
-    #envs.is_vector_env = True
-    #envs = gym.wrappers.RecordEpisodeStatistics(envs)
+    start = time.time()
+
+    #for _ in range(10): gen(main_env)
+    #gen(main_env2)
+    #gen(main_env3)
+
+    # t = [threading.Thread(target=gen, args=[main_env]) for _ in range(10)]
+
+    # for ti in t: ti.start()
+    # for ti in t: ti.join()'
+
+    ppo = ppo.PPOTrainer(
+            policies['explore_low_agent'],
+            policy_lr=1e-5,
+            value_lr=1e-3,
+            target_kl_div=0.02,
+            max_policy_train_iters=80,
+            value_train_iters=80)
     
-    #model = PPO(env)
-    #model.train(100)
-    
-    simple_space = Discrete(len(env.emulator.simple_actions))
-    
-    explore_low_policy = ppo.Policy([], simple_space).to('cuda')
-    #explore_med_policy = ppo.Policy([], env.action_spaces['explore_med_agent']).to('cpu')
-    combat_policy = ppo.Policy([], simple_space).to('cuda')
-    
-    explore_agent = ExploreLowAgent('explore_low_agent', simple_space, 0)
-    flee_agent = BasicFleeAgent('combat_agent', simple_space)
-    
-    policies = {'explore_low_agent': explore_low_policy, 'combat_agent': combat_policy}#, 'explore_med_agent': explore_med_policy}
-    
-    env.initial_agent('explore_low_agent')
-    env.register_agent(explore_agent)
-    env.register_agent(flee_agent)
-    
-    #train_data, rewards = ppo.rollout(policies, env)
-    
-    #print(train_data['explore_low_agent'][0])
-    #print(train_data['explore_med_agent'])
-    #print(rewards)
-    
-    ppo.train(policies, env)
+    #temp variables
+    num_minibatches = 4
+    num_envs = 5
+    num_steps = 200
+    num_iterations = 10
+    learning_rate = 2.5e-4
+    update_epochs = 4
+    ent_coef = 0.01
+    vf_coef = 0.5
+    max_grad_norm = 0.5
+    target_kl = None
+
+    anneal_lr = True
+    norm_adv = True
+    clip_coef = 0.2
+    clip_vloss = True
+
+    batch_size = num_envs * num_steps
+    minibatch_size = batch_size // num_minibatches
+
+    #setup
+    agent = policies['explore_low_agent']
+    optimizer = optim.Adam(agent.parameters(), lr=learning_rate, eps=1e-5)
+
+    for iteration in range(1, num_iterations + 1):
+        if anneal_lr:
+            frac = 1.0 - (iteration - 1.0) / num_iterations
+            lrnow = frac * learning_rate
+            optimizer.param_groups[0]["lr"] = lrnow
+
+        rollouts = generate_rollouts(policies, main_env, 'explore_low_agent', count=num_envs, max_steps=num_steps, verbose=True)
+        #print(f"Time Elapsed: {time.time() - start}")
+
+        successes = sum([1 if rollout.success else 0 for rollout in rollouts['explore_low_agent']])
+        total = len(rollouts['explore_low_agent'])
+        print(f"Success Rate: {successes/total*100}%")
+
+        if successes == 0:
+            print("Repeating without training!")
+            #continue
+        
+        train_rollouts = []
+        for rollout in rollouts['explore_low_agent']:
+            #if rollout.success: 
+                train_rollouts.append(rollout)
+
+        obs, actions, action_log_probs, values, advantages, returns = compose_rollouts(rollouts['explore_low_agent'])
+
+        #unnecessary since already permutating
+        b_inds = np.arange(batch_size)
+        for epoch in range(update_epochs):
+            np.random.shuffle(b_inds)
+            for start in range(0, batch_size, minibatch_size):
+                end = start + minibatch_size
+                mb_inds = b_inds[start:end]
+
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs[mb_inds], actions.long()[mb_inds])
+                logratio = newlogprob - action_log_probs[mb_inds]
+                ratio = logratio.exp()
+
+                with torch.no_grad():
+                    old_approx_kl = (-logratio).mean()
+                    approx_kl = ((ratio - 1) - logratio).mean()
+                
+                mb_advantages = advantages[mb_inds]
+                if norm_adv:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+                # Policy loss
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                # Value loss
+                newvalue = newvalue.view(-1)
+                if clip_vloss:
+                    v_loss_unclipped = (newvalue - returns[mb_inds]) ** 2
+                    v_clipped = values[mb_inds] + torch.clamp(
+                        newvalue - values[mb_inds],
+                        -clip_coef,
+                        clip_coef
+                    )
+                    v_loss_clipped = (v_clipped - returns[mb_inds]) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+                else:
+                    v_loss = 0.5 * ((newvalue - returns[mb_inds]) ** 2).mean()
+                
+                entropy_loss = entropy.mean()
+                loss = pg_loss - ent_coef * entropy_loss + v_loss * vf_coef
+
+                # Train
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+                optimizer.step()
+            
+            if target_kl is not None and approx_kl > target_kl:
+                break
+
+
+        #ppo.train_policy(obs, actions, action_log_probs, gaes)
+        #ppo.train_value(obs, returns)
+
+    #print(rollout1)

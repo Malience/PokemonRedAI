@@ -1,4 +1,5 @@
 import sys
+import matplotlib.pyplot as plt
 import glob
 from os.path import exists
 from pathlib import Path
@@ -13,6 +14,9 @@ from poke_mem_utility import *
 from ram_map import *
     
 if __name__ == '__main__':
+    sess_id = str(uuid.uuid4())[:8]
+    sess_path = Path(f'session_{sess_id}')
+    sess_path.mkdir(exist_ok=True)
     
     emulation_speed = 2
     gb_path = './PokemonRed.gb'
@@ -33,6 +37,8 @@ if __name__ == '__main__':
     screen = pyboy.botsupport_manager().screen()
     pyboy.set_emulation_speed(emulation_speed)
     
+    print(screen.screen_ndarray().shape)
+    
     with open(init_state, "rb") as f: pyboy.load_state(f)
     
     frame = 0
@@ -43,7 +49,7 @@ if __name__ == '__main__':
         action = 7
         
         x, y, n = position(pyboy)
-        print(f'x: {x}, y: {y}, n: {n}')
+        #print(f'x: {x}, y: {y}, n: {n}')
         
         if dumpmem and frame%10 == 0:
             print('saved')
@@ -60,6 +66,9 @@ if __name__ == '__main__':
         if printtarget > 0:
             #print_mem_radius(env, printtarget, 5)
             print_mem_range(env, printtarget, printtarget + 40)
+        
+        if frame % 50 == 0:
+            plt.imsave(sess_path / Path(f'curframe.jpeg'), screen.screen_ndarray()[::2,::2,0])
         
         pyboy.tick()
         frame+=1

@@ -25,11 +25,11 @@ class PokeRedEnv(ParallelEnv):
         "render_mode": "headless"
     }
 
-    def __init__(self, emulator, states):
+    def __init__(self, emulator, save_states):
         super().__init__()
         
         self.emulator = emulator
-        self.states = states
+        self.save_states = save_states
         
         self.reset_count = 0
         
@@ -48,6 +48,7 @@ class PokeRedEnv(ParallelEnv):
         
     def register_agent(self, multiagent):
         self.agents[multiagent.name] = multiagent
+        multiagent.reset(self.emulator, self.state)
         
     def initial_agent(self, agent_id):
         self.initial = agent_id
@@ -55,8 +56,14 @@ class PokeRedEnv(ParallelEnv):
     def reset(self, seed=None, options=None, initial_agents=['default']):
         self.seed = seed
         
-        self.emulator.reset(random.choice(self.states))
+        self.emulator.reset(random.choice(self.save_states))
         self.steps = {}
+        
+        self.state = {}
+        
+        for agent in self.agents.values():
+            if agent is None: continue
+            agent.reset(self.emulator, self.state)
         
         if self.initial is not None: initial_agents = [self.initial]
         
@@ -67,25 +74,25 @@ class PokeRedEnv(ParallelEnv):
                 return
             
             obs[agent] = self.render()
-
+        
         return obs, {}
         
     def step(self, actions):
         render = self.render()
         
-        obs, rewards, term, trun, infos = {}, {}, False, False, {}
+        obs, rewards, term, trun, infos = {}, {}, {}, {}, {}
         
         for actor, action in actions.items():
             if actor == 'default':
                 self.emulator.run(action if action is not None else SIMPLE_ACTION_SPACE.sample())
                 ob, reward, trm, trn, info = {'default': None}, 0, False, False, {}
             else:
-                ob, reward, trm, trn, info = self.agents[actor].step(self.emulator, action)
+                ob, reward, trm, trn, info = self.agents[actor].step(self.emulator, action, self.state)
             
             for o in ob: obs[o] = render
             rewards[actor] = reward
-            term |= trm
-            trun |= trn
+            term[actor] = trm
+            trun[actor] = trn
             infos[actor] = info
             
             if actor not in self.steps: self.steps[actor] = 1
@@ -94,7 +101,8 @@ class PokeRedEnv(ParallelEnv):
         return obs, rewards, term, trun, infos
     
     def render(self):
-        return self.emulator.screen.screen_ndarray()[::2, ::2]
+        #return self.emulator.screen.screen_ndarray()[::2, ::2, 0]
+        return self.emulator.frames
     
     def check_if_done(self):
         return self.step_count >= self.max_steps

@@ -4,6 +4,7 @@ from pathlib import Path
 import uuid
 
 from pokered_env import PokeRedEnv
+from pokered_vecenv import PokeRedVecEnv
 
 import supersuit as ss
 from gymnasium.spaces import Tuple, Box, Discrete
@@ -19,26 +20,12 @@ import ppo
 
 import torch
 
-def make_env(rank, env_conf, seed=0):
-    """
-    Utility function for multiprocessed env.
-    :param env_id: (str) the environment ID
-    :param num_env: (int) the number of environments you wish to have in subprocesses
-    :param seed: (int) the initial seed for RNG
-    :param rank: (int) index of the subprocess
-    """
-    def _init():
-        env = PokeRedEnv(env_conf)
-        env.reset(seed=(seed + rank))
-        return env
-    set_random_seed(seed)
-    return _init
-
-def train_explore(emulator, target_id, states, combat_agent, combat_policy, name):
-    env = PokeRedEnv(emulator, states)
+def train_explore(emulators, target_id, states, combat_agent, combat_policy, name):
+    env = PokeRedVecEnv(emulators, states)
+    #env = PokeRedEnv(emulators, states)
     
-    explore_policy = ppo.Policy([], SIMPLE_ACTION_SPACE).to('cuda')
-    explore_agent = ExploreLowAgent(name, SIMPLE_ACTION_SPACE, target_id)
+    explore_policy = ppo.Policy([], MOVEMENT_ACTION_SPACE).to('cuda')
+    explore_agent = ExploreLowAgent(name, MOVEMENT_ACTION_SPACE, target_id)
     
     env.register_agent(explore_agent)
     env.register_agent(combat_agent)
@@ -56,6 +43,7 @@ def train_explore(emulator, target_id, states, combat_agent, combat_policy, name
 if __name__ == '__main__':
     sess_id = str(uuid.uuid4())[:8]
     sess_path = Path(f'session_{sess_id}')
+    sess_path.mkdir(exist_ok=True)
     
     states_path = Path('states')
     states_path.mkdir(exist_ok=True)
@@ -67,11 +55,12 @@ if __name__ == '__main__':
     main_emulator = Emulator(sess_path, gb_path, instance_id='main', headless=False, emulation_speed=2)
     main_env = PokeRedEnv(main_emulator, [init_state])
     
-    train_emulator = Emulator(sess_path, gb_path, instance_id='train', headless=True)
+    train_emulator = Emulator(sess_path, gb_path, instance_id=f'train', headless=True)
+    train_emulators = [Emulator(sess_path, gb_path, instance_id=f'train_{i}', headless=True) for i in range(2)]
     
-    explore_low_policy = ppo.Policy([], SIMPLE_ACTION_SPACE).to('cuda')
+    #explore_low_policy = ppo.Policy([], MOVEMENT_ACTION_SPACE).to('cuda')
     
-    explore_agent = ExploreLowAgent('explore_low_agent', SIMPLE_ACTION_SPACE, 0)
+    #explore_agent = ExploreLowAgent('explore_low_agent', MOVEMENT_ACTION_SPACE, 0)
     
     #policies = {'explore_low_agent': explore_low_policy, 'combat_agent': combat_policy}#, 'explore_med_agent': explore_med_policy}
     
@@ -105,14 +94,20 @@ if __name__ == '__main__':
     current_combat_agent = 'flee_agent'
     current_explore_agent = None
     
+    first = True
+    
     request_action = True
     current_target = None
     obs, infos = main_env.reset()
     while True:
         #if agent_enabled: action, _states = model.predict(obs, deterministic=False)
         
-        if request_action:  
-            inp = input()
+        if request_action:
+            if first:
+                inp = 0
+                first = False
+            else:
+                inp = input()
             current_target = int(inp)
             
             x, y, n = position(main_emulator.pyboy)
@@ -136,7 +131,7 @@ if __name__ == '__main__':
                     
                     map_states[n][(x, y, n)] = state_path
                     
-                agent, policy = train_explore(train_emulator, current_target, list(map_states[n].values()), flee_agent, flee_policy, agent_id)
+                agent, policy = train_explore(train_emulators, current_target, list(map_states[n].values()), flee_agent, flee_policy, agent_id)
                 
                 agents[agent_id] = agent
                 policies[agent_id] = policy

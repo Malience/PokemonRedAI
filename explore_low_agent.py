@@ -1,3 +1,5 @@
+import math
+
 from multiagent import MultiAgent
 
 from gymnasium import spaces
@@ -8,27 +10,49 @@ class ExploreLowAgent(MultiAgent):
     def __init__(self, name, action_space, target_n):
         super().__init__(name, action_space)
         self.target_n = target_n
-
-    def step(self, emulator, action):
+    
+    #TODO for parallelization we will just give it state as a parameter
+    def reset(self, emulator, state):
+        '''
+        returns obs, info
+        '''
+        
+        state['places'] = set()
+        state['farthest'] = 0.0
+        
+        return {}
+    
+    def step(self, emulator, action, state):
         
         reward = 0
-        trun = False
+        term = False
+        info = {}
         
-        old_n = map_n(emulator.pyboy)
+        old_x, old_y, old_n = position(emulator.pyboy)
         
         emulator.run(action)
         
-        new_n = map_n(emulator.pyboy)
+        x, y, new_n = position(emulator.pyboy)
         
+        if (x, y, new_n) not in state['places']:
+            state['places'].add((x, y, new_n))
+            reward += 0.01
+            
+        dist = (x - old_x)**2 + (y - old_y)**2
         
+        # if dist > state['farthest']:
+        #     reward += (dist - state['farthest']) * 0.2
         
         if new_n == self.target_n:
-            reward = 5
-            trun = True
+            reward += 5
+            term = True
+            info['success'] = True
+            
         elif new_n != old_n:
-            reward = -1
-            trun = True
+            reward = -0.5
+            term = True
+            info['success'] = False
         
         #print(f'Target: {self.target_n}, Old: {old_n}, New: {new_n}, Rewards: {reward}')
         
-        return [self.name], reward, False, trun, None
+        return [self.name], reward, term, False, info
