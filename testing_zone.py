@@ -40,7 +40,7 @@ if __name__ == '__main__':
     
     gb_path = './PokemonRed.gb'
     init_state = './has_pokedex_nballs.state'
-    #init_state = 'states/11_5_0-0.state'
+    init_state = 'states/11_5_0-0.state'
     
     main_emulator = Emulator(sess_path, gb_path, instance_id='main', headless=True)
     main_emulator2 = Emulator(sess_path, gb_path, instance_id='main', headless=True)
@@ -53,7 +53,7 @@ if __name__ == '__main__':
     flee_agent = BasicFleeAgent('flee_agent', SIMPLE_ACTION_SPACE)
     
     explore_low_policy = ppo.Policy([], MOVEMENT_ACTION_SPACE)
-    explore_agent = ExploreLowAgent('explore_low_agent', MOVEMENT_ACTION_SPACE, 0)
+    explore_agent = ExploreLowAgent('explore_low_agent', MOVEMENT_ACTION_SPACE, 12)
     
     
     main_env.register_agent(flee_agent)
@@ -94,9 +94,9 @@ if __name__ == '__main__':
     
     #temp variables
     num_minibatches = 4
-    num_envs = 5
-    num_steps = 200
-    num_iterations = 10
+    num_envs = 10
+    num_steps = 400
+    num_iterations = 100
     learning_rate = 2.5e-4
     update_epochs = 4
     ent_coef = 0.01
@@ -104,7 +104,7 @@ if __name__ == '__main__':
     max_grad_norm = 0.5
     target_kl = None
 
-    anneal_lr = True
+    anneal_lr = False
     norm_adv = True
     clip_coef = 0.2
     clip_vloss = True
@@ -131,7 +131,7 @@ if __name__ == '__main__':
 
         if successes == 0:
             print("Repeating without training!")
-            #continue
+            continue
         
         train_rollouts = []
         for rollout in rollouts['explore_low_agent']:
@@ -141,11 +141,14 @@ if __name__ == '__main__':
         obs, actions, action_log_probs, values, advantages, returns = compose_rollouts(rollouts['explore_low_agent'])
 
         #unnecessary since already permutating
-        b_inds = np.arange(batch_size)
+        iter_size = obs.shape[0]
+        b_inds = np.arange(iter_size)
         for epoch in range(update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, batch_size, minibatch_size):
+            for start in range(0, iter_size, minibatch_size):
                 end = start + minibatch_size
+                if end > iter_size:
+                    end = iter_size
                 mb_inds = b_inds[start:end]
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs[mb_inds], actions.long()[mb_inds])
@@ -191,7 +194,12 @@ if __name__ == '__main__':
             
             if target_kl is not None and approx_kl > target_kl:
                 break
-
+        
+        print(f"value_loss: {v_loss.item()}")
+        print(f"policy_loss: {pg_loss.item()}")
+        print(f"entropy: {entropy_loss.item()}")
+        print(f"old_approx_kl: {old_approx_kl.item()}")
+        print(f"approx_kl: {approx_kl.item()}")
 
         #ppo.train_policy(obs, actions, action_log_probs, gaes)
         #ppo.train_value(obs, returns)

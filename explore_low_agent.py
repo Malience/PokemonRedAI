@@ -17,6 +17,7 @@ class ExploreLowAgent(MultiAgent):
         returns obs, info
         '''
         
+        state['init_n'] = -1
         state['places'] = set()
         state['farthest'] = 0.0
         
@@ -29,13 +30,19 @@ class ExploreLowAgent(MultiAgent):
         info = {}
         
         old_x, old_y, old_n = position(emulator.pyboy)
+        if state['init_n'] < 0:
+            state['init_n']  = old_n
         
+        init_n = state['init_n']
+
+
         emulator.run(action)
         
         x, y, new_n = position(emulator.pyboy)
         
         if (x, y, new_n) not in state['places']:
             state['places'].add((x, y, new_n))
+            # if new_n == init_n:
             reward += 0.01
             
         dist = (x - old_x)**2 + (y - old_y)**2
@@ -49,9 +56,9 @@ class ExploreLowAgent(MultiAgent):
             info['success'] = True
             
         elif new_n != old_n:
-            reward = -0.5
-            term = True
-            info['success'] = False
+            reward = -0.001
+            #term = True
+            #info['success'] = False
         
         #print(f'Target: {self.target_n}, Old: {old_n}, New: {new_n}, Rewards: {reward}')
         

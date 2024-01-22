@@ -27,19 +27,21 @@ def calculate_gaes(rewards, values, gamma=0.99, decay=0.97):
     return np.array(gaes[::-1])
 
 class Rollout():
-    def __init__(self, agent_id):
+    def __init__(self, agent_id, max_steps, obs_shape, action_shape=(1,)):
         self.agent_id = agent_id
-        self.obs = []
-        self.actions = []
-        self.action_log_probs = []
-        self.values = []
-        self.rewards = []
+        self.max_steps = max_steps
+
+        self.obs = torch.zeros((max_steps,) + (3, 72, 80)) #TODO make the shape better
+        self.actions = torch.zeros((max_steps)) #TODO Add action shapes
+        self.logprobs = torch.zeros((max_steps))
+        self.rewards = torch.zeros((max_steps))
+        self.values = torch.zeros((max_steps))
+
         self.size = 0
         
         self.total_reward = 0
         self.next_value = -1
         
-        #self.gaes = None
         self.advantages = None
         self.returns = None
         
@@ -50,15 +52,16 @@ class Rollout():
         self.ended = False
         self.calculated = False
         
-    def step(self, obs, action, action_log_prob, value):
-        self.obs.append(obs)
-        self.actions.append(action)
-        self.action_log_probs.append(action_log_prob)
-        self.values.append(value)
+    def step(self, obs, action, logprob, value):
+        self.obs[self.size] = obs
+        self.actions[self.size] = action
+        self.logprobs[self.size] = logprob
+        self.values[self.size] = value
+
         self.size += 1
         
     def add_reward(self, reward):
-        self.rewards.append(reward)
+        self.rewards[self.size - 1] = reward
         self.total_reward += reward
         
     def end(self, next_value, term=False, trun=False, success=False):
@@ -69,41 +72,11 @@ class Rollout():
         self.next_value = next_value
 
         self.ended = True
-        
-    #deprecated
-    def resize(self, new_size):
-        assert new_size > 0
-        assert self.size > 0
-        
-        # No need to resize
-        if new_size == self.size: return
-        
-        # Need to shrink
-        if new_size < self.size:
-            self.obs = self.obs[:new_size]
-            self.actions = self.actions[:new_size]
-            self.action_log_probs = self.action_log_probs[:new_size]
-            self.values = self.values[:new_size]
-            self.rewards = self.rewards[:new_size]
-            
-        # We need to pad!!!
-        else:
-            diff = new_size - self.size
-            obs_shape = self.obs[0].shape
-            self.obs += [np.zeros(obs_shape)] * diff
-            self.actions += [-1] * diff
-            self.action_log_probs += [0] * diff
-            self.values += [0] * diff
-            self.rewards += [0] * diff
-        
-        self.size = new_size
-            
      
     def calculate(self, gamma=0.99, gae_lambda=0.95):
         with torch.no_grad():
             #TODO make all of this run on torch, and not a method
-            #self.rewards = torch.tensor(self.rewards, dtype=torch.float32)
-            self.advantages = [0] * len(self.rewards)#torch.zeros_like(self.rewards)
+            self.advantages = torch.zeros_like(self.rewards)
             lastgaelam = 0
             next_done = 1.0 if self.term or self.trun else 0.0
             for t in reversed(range(self.size)):
@@ -119,28 +92,13 @@ class Rollout():
             
             self.returns = self.advantages + self.values
 
-        #self.returns = discount_rewards(self.rewards, discount_gamma)
-        #self.gaes = calculate_gaes(self.rewards, self.values, gae_gamma, gae_decay)
-
     def get(self):
-        return self.obs, self.actions, self.action_log_probs, self.values, self.advantages, self.returns
-
-    #deprecated    
-    def permute(self, permute_idxs=None):
-        if permute_idxs is None:
-            permute_idxs = np.random.permutation(self.size)
-            
-        assert len(permute_idxs) == self.size
-        
-        arr = self.obs[list(permute_idxs)]
-
-        return (np.array(self.obs)[permute_idxs],
-                np.array(self.actions)[permute_idxs],
-                np.array(self.action_log_probs)[permute_idxs],
-                np.array(self.values)[permute_idxs],
-                #self.rewards[permute_idxs],
-                np.array(self.advantages)[permute_idxs],
-                np.array(self.returns)[permute_idxs])
+        return (self.obs[:self.size],
+                self.actions[:self.size],
+                self.logprobs[:self.size],
+                self.values[:self.size],
+                self.advantages[:self.size],
+                self.returns[:self.size])
     
     def __str__(self):
         return f"Rollout - {self.agent_id} - Reward = {self.total_reward}, Success = {self.success}"
@@ -168,7 +126,7 @@ def generate_rollouts(policies, env, target, count=1, collect=None, max_steps=20
         
         cur_rollouts = {}
         for agent in collect:
-            cur_rollouts[agent] = Rollout(agent)
+            cur_rollouts[agent] = Rollout(agent, max_steps, env.observation_space.shape)
             
         reset = False
         for _ in range(max_steps):
@@ -211,7 +169,7 @@ def generate_rollouts(policies, env, target, count=1, collect=None, max_steps=20
                         
                         if verbose: print(cur_rollouts[agent])
 
-                        cur_rollouts[agent] = Rollout(agent)
+                        cur_rollouts[agent] = Rollout(agent, max_steps, env.observation_space.shape)
                         
                         if agent == target:
                             reset = True
@@ -244,19 +202,19 @@ def compose_rollouts(rollouts):
         rollout.calculate()
         r_obs, r_actions, r_action_log_probs, r_values, r_gaes, r_returns = rollout.get()
 
-        # obs.append(r_obs)
-        # actions.append(r_actions)
-        # action_log_probs.append(r_action_log_probs)
-        # values.append(r_values)
-        # gaes.append(r_gaes)
-        # returns.append(r_returns)
+        obs.append(r_obs)
+        actions.append(r_actions)
+        action_log_probs.append(r_action_log_probs)
+        values.append(r_values)
+        gaes.append(r_gaes)
+        returns.append(r_returns)
 
-        obs += r_obs
-        actions += r_actions
-        action_log_probs += r_action_log_probs
-        values += r_values
-        gaes += r_gaes
-        returns += r_returns
+        # obs += r_obs
+        # actions += r_actions
+        # action_log_probs += r_action_log_probs
+        # values += r_values
+        # gaes += r_gaes
+        # returns += r_returns
         
     #obs = np.concatenate(obs, axis=0)
 
