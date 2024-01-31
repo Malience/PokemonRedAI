@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import torch
 from torch.distributions.categorical import Categorical
@@ -188,6 +189,121 @@ def generate_rollouts(policies, env, target, count=1, collect=None, max_steps=20
 
         if len(rollouts[target]) >= count: break
     return rollouts
+
+def obs_encoder(obs):
+    new_obs = {}
+    encoding = {}
+    
+    for i in range(len(obs)):
+        for agent in obs[i].keys():
+            if agent not in new_obs:
+                new_obs[agent] = []
+                encoding[agent] = []
+            
+            new_obs[agent].append(obs[i][agent])
+            encoding[agent] += [i]
+            
+    for agent in new_obs:
+        new_obs[agent] = torch.tensor(np.array(new_obs[agent]), dtype=torch.float32)
+        
+    return new_obs, encoding
+
+def generate_rollouts_vec(policies, env, target, count=1, collect=None, max_steps=200, verbose=False):
+    '''
+        policies: Dict of agent_id to policy
+        env: vector env
+        target: Primary policy to collect rollouts for. Will collect rollouts until this policy has received an amount specified by count.
+        count:  How many rollouts to collect for the primary target
+        collect: Set of Agents to collect, if left as None only collects rollouts for the primary target policy
+        max_steps:
+    '''
+
+    if collect is None:
+        collect = {target}
+
+    rollouts = {}
+    for agent in collect:
+        rollouts[agent] = []
+
+    cur_rollouts = [{} for i in range(env.num_envs)]
+    for i in range(env.num_envs):
+        for agent in collect:
+            cur_rollouts[i][agent] = Rollout(agent, max_steps, env.observation_space.shape)
+            
+    cur_steps = np.zeros((env.num_envs,))
+
+    obs, infos = env.reset()
+
+    time_spent_stepping = 0
+
+    while True:
+        new_obs, encoding = obs_encoder(obs)
+
+        actions = [{} for i in range(env.num_envs)]
+        for agent in new_obs.keys():
+            agent_obs = new_obs[agent]
+            #agent_obs = torch.tensor(np.array([agent_obs]), dtype=torch.float32)
+            with torch.no_grad():
+                action, log_prob, _, value = policies[agent].get_action_and_value(agent_obs)
+
+            for i in range(len(encoding[agent])):
+                e = encoding[agent][i]
+                actions[e][agent] = action[i].item()
+                if agent in collect:
+                    cur_rollouts[e][agent].step(agent_obs[i], action[i], log_prob[i], value[i].flatten())
+
+        start = time.time()
+
+        next_obs, rewards, terms, truns, infos = env.step(actions)
+
+        time_spent_stepping += time.time() - start
+
+        cur_steps += 1
+
+        for i in range(env.num_envs):
+            def end_rollout(succ, agent):
+                if agent not in next_obs[i]:
+                    temp_obs = next_obs[i].values()[0] #TEMP
+                else:
+                    temp_obs = next_obs[i][agent]
+                temp_obs = torch.tensor(np.array([temp_obs]), dtype=torch.float32)
+
+                with torch.no_grad():
+                    next_value = policies[agent].get_value(temp_obs)
+
+                cur_rollouts[i][agent].end(next_value, terms[i][agent], truns[i][agent], succ)
+                
+                rollouts[agent].append(cur_rollouts[i][agent])
+                
+                if verbose: print(cur_rollouts[i][agent])
+
+                cur_rollouts[i][agent] = Rollout(agent, max_steps, env.observation_space.shape)
+                env.reset(envs=[i])
+                cur_steps[i] = 0
+
+            for agent in next_obs[i].keys():
+                if agent in collect:
+                    cur_rollouts[i][agent].add_reward(rewards[i][agent])
+
+                    if terms[i][agent]:
+                        succ = True if 'success' in infos[i][agent] and infos[i][agent]['success'] else False
+                        end_rollout(succ, agent)
+                        
+            
+            if cur_steps[i] >= max_steps - 1:
+                for agent in cur_rollouts[i].keys():
+                    if agent in collect:
+                        end_rollout(False, agent)
+                        
+        obs = next_obs
+                    
+        if len(rollouts[target]) >= count:
+            break
+        
+    if verbose:
+        print(f"Time spent stepping: {time_spent_stepping}")
+
+    return rollouts
     
 def compose_rollouts(rollouts):
     length = 0
@@ -198,7 +314,6 @@ def compose_rollouts(rollouts):
     obs, actions, action_log_probs, values, gaes, returns = [], [], [], [], [], []
     
     for rollout in rollouts:
-        #rollout.resize(length)
         rollout.calculate()
         r_obs, r_actions, r_action_log_probs, r_values, r_gaes, r_returns = rollout.get()
 
@@ -209,15 +324,6 @@ def compose_rollouts(rollouts):
         gaes.append(r_gaes)
         returns.append(r_returns)
 
-        # obs += r_obs
-        # actions += r_actions
-        # action_log_probs += r_action_log_probs
-        # values += r_values
-        # gaes += r_gaes
-        # returns += r_returns
-        
-    #obs = np.concatenate(obs, axis=0)
-
     obs = torch.cat(obs, 0)
     actions = torch.cat(actions, 0)
     action_log_probs = torch.cat(action_log_probs, 0)
@@ -225,14 +331,4 @@ def compose_rollouts(rollouts):
     gaes = torch.cat(gaes, 0)
     returns = torch.cat(returns, 0)
 
-    # obs = torch.tensor(np.concatenate(obs, axis=0), dtype=torch.float32)
-    # actions = torch.tensor(np.concatenate(actions, axis=0), dtype=torch.int32)
-    # action_log_probs = torch.tensor(np.concatenate(action_log_probs, axis=0), dtype=torch.float32)
-    # values = torch.tensor(np.concatenate(values, axis=0), dtype=torch.float32)
-    # gaes = torch.tensor(np.concatenate(gaes, axis=0), dtype=torch.float32)
-    # returns = torch.tensor(np.concatenate(returns, axis=0), dtype=torch.float32)
-        
     return obs, actions, action_log_probs, values, gaes, returns
-        
-        
-        

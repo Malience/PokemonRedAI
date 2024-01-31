@@ -11,6 +11,8 @@ import supersuit as ss
 from gymnasium.spaces import Tuple, Box, Discrete
 
 from explore_low_agent import ExploreLowAgent
+from pokered_vecenv import PokeRedVecEnv
+from explore_move_paint import ExploreMovePaintAgent
 from basic_flee_agent import BasicFleeAgent
 
 #from ppo import PPO
@@ -48,33 +50,51 @@ if __name__ == '__main__':
     main_env = PokeRedEnv(main_emulator, [init_state])
     main_env2 = PokeRedEnv(main_emulator2, [init_state])
     main_env3 = PokeRedEnv(main_emulator3, [init_state])
+
+    emulators = [Emulator(sess_path, gb_path, instance_id=f'main_{i}', headless=True) for i in range(10)]
+    vec_env = PokeRedVecEnv(emulators, [init_state])
     
+
     flee_policy = ppo.Policy([], SIMPLE_ACTION_SPACE)
     flee_agent = BasicFleeAgent('flee_agent', SIMPLE_ACTION_SPACE)
     
-    explore_low_policy = ppo.Policy([], MOVEMENT_ACTION_SPACE)
-    explore_agent = ExploreLowAgent('explore_low_agent', MOVEMENT_ACTION_SPACE, 12)
+    explore_policy = ppo.Policy([], MOVEMENT_ACTION_SPACE)
+    explore_agent = ExploreLowAgent('explore_agent', MOVEMENT_ACTION_SPACE, 12)
+    #explore_agent = ExploreMovePaintAgent('explore_agent', MOVEMENT_ACTION_SPACE, 12)
     
     
     main_env.register_agent(flee_agent)
     main_env.register_agent(explore_agent)
-    main_env.initial_agent('explore_low_agent')
+    main_env.initial_agent('explore_agent')
     
     main_env2.register_agent(flee_agent)
     main_env2.register_agent(explore_agent)
-    main_env2.initial_agent('explore_low_agent')
+    main_env2.initial_agent('explore_agent')
     
     main_env3.register_agent(flee_agent)
     main_env3.register_agent(explore_agent)
-    main_env3.initial_agent('explore_low_agent')
+    main_env3.initial_agent('explore_agent')
+
+    vec_env.register_agent(flee_agent)
+    vec_env.register_agent(explore_agent)
+    vec_env.initial_agent('explore_agent')
     
-    policies = {'explore_low_agent': explore_low_policy, 'flee_agent': flee_policy}
+    policies = {'explore_agent': explore_policy, 'flee_agent': flee_policy}
 
 
     #ppo.train(policies, env)
     
-    start = time.time()
+    # start = time.time()
 
+    # #rollouts = generate_rollouts(policies, main_env, 'explore_agent', count=10, max_steps=1000, verbose=True)
+
+    # print(f"Non Vec Time: {time.time()-start:.4f}")
+
+    # start = time.time()
+
+    # rollouts = generate_rollouts_vec(policies, vec_env, 'explore_agent', count=10, max_steps=1000, verbose=True)
+
+    # print(f"Vec Time: {time.time()-start:.4f}")
     #for _ in range(10): gen(main_env)
     #gen(main_env2)
     #gen(main_env3)
@@ -85,7 +105,7 @@ if __name__ == '__main__':
     # for ti in t: ti.join()'
 
     ppo = ppo.PPOTrainer(
-            policies['explore_low_agent'],
+            policies['explore_agent'],
             policy_lr=1e-5,
             value_lr=1e-3,
             target_kl_div=0.02,
@@ -113,7 +133,7 @@ if __name__ == '__main__':
     minibatch_size = batch_size // num_minibatches
 
     #setup
-    agent = policies['explore_low_agent']
+    agent = policies['explore_agent']
     optimizer = optim.Adam(agent.parameters(), lr=learning_rate, eps=1e-5)
 
     for iteration in range(1, num_iterations + 1):
@@ -122,23 +142,24 @@ if __name__ == '__main__':
             lrnow = frac * learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
-        rollouts = generate_rollouts(policies, main_env, 'explore_low_agent', count=num_envs, max_steps=num_steps, verbose=True)
+        #rollouts = generate_rollouts(policies, main_env, 'explore_agent', count=num_envs, max_steps=num_steps, verbose=True)
+        rollouts = generate_rollouts_vec(policies, vec_env, 'explore_agent', count=num_envs, max_steps=num_steps, verbose=True)
         #print(f"Time Elapsed: {time.time() - start}")
 
-        successes = sum([1 if rollout.success else 0 for rollout in rollouts['explore_low_agent']])
-        total = len(rollouts['explore_low_agent'])
+        successes = sum([1 if rollout.success else 0 for rollout in rollouts['explore_agent']])
+        total = len(rollouts['explore_agent'])
         print(f"Success Rate: {successes/total*100}%")
 
         if successes == 0:
             print("Repeating without training!")
-            continue
+            #continue
         
         train_rollouts = []
-        for rollout in rollouts['explore_low_agent']:
+        for rollout in rollouts['explore_agent']:
             #if rollout.success: 
                 train_rollouts.append(rollout)
 
-        obs, actions, action_log_probs, values, advantages, returns = compose_rollouts(rollouts['explore_low_agent'])
+        obs, actions, action_log_probs, values, advantages, returns = compose_rollouts(rollouts['explore_agent'])
 
         #unnecessary since already permutating
         iter_size = obs.shape[0]

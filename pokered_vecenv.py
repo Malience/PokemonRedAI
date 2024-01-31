@@ -33,11 +33,13 @@ class PokeRedVecEnv(ParallelEnv):
         self.save_states = save_states
         
         self.num_envs = len(emulators)
-        
+
         self.envs = []
         
         for i in range(self.num_envs):
             self.envs += [PokeRedEnv(self.emulators[i], self.save_states)]
+
+        self.observation_space = self.envs[0].observation_space
         
         self.reset()
         
@@ -49,11 +51,18 @@ class PokeRedVecEnv(ParallelEnv):
         for env in self.envs:
             env.initial_agent(agent_id)
         
-    def reset(self, seed=None, options=None, initial_agents=['default']):
+    def reset(self, envs = None, seed=None, options=None, initial_agents=['default']):
         obs = []
         infos = []
         
-        for env in self.envs:
+        if envs is None:
+            envs = self.envs
+        elif envs is int:
+            envs = [self.envs[envs]]
+        else:
+            envs = [self.envs[i] for i in envs]
+
+        for env in envs:
             ob, inf = env.reset(seed, options, initial_agents)
             obs += [ob]
             infos += [inf]

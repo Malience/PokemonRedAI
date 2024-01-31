@@ -53,25 +53,6 @@ class Policy(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
 
-#deprecated
-def discount_rewards(rewards, gamma=0.99):
-    print(rewards)
-    new_rewards = [float(rewards[-1])]
-    for i in reversed(range(len(rewards)-1)):
-        new_rewards.append(float(rewards[i]) + gamma * new_rewards[-1])
-    return np.array(new_rewards[::-1])
-
-#deprecated 
-def calculate_gaes(rewards, values, gamma=0.99, decay=0.97):
-    next_values = np.concatenate([values[1:], [0]])
-    deltas = [rew + gamma * next_val - val for rew, val, next_val in zip(rewards, values, next_values)]
-    
-    gaes = [deltas[-1]]
-    for i in reversed(range(len(deltas)-1)):
-        gaes.append(deltas[i] + decay * gamma * gaes[-1])
-        
-    return np.array(gaes[::-1])
-
 class PPOTrainer():
     def __init__(self,
                 policy_network,
@@ -139,14 +120,13 @@ def obs_encoder(obs):
                 new_obs[agent] = []
                 encoding[agent] = []
             
-            new_obs[agent].append(obs[i][agent] / 255.0)
+            new_obs[agent].append(obs[i][agent])
             encoding[agent] += [i]
             
     for agent in new_obs:
         new_obs[agent] = torch.tensor(np.array(new_obs[agent]), dtype=torch.float32)
         
     return new_obs, encoding
-    
 
 def rollout(policies, env, max_steps=10):
     #train_data = [[], [], [], [], []]
