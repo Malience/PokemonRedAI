@@ -13,238 +13,99 @@ import torch.optim as optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-# layer_init from CleanRL
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+from training import Trainer
 
-class Policy(nn.Module):
-    def __init__(self, obs_space, action_space):
-        super().__init__()
-        
-        #TODO: Dict spaces
-        
-        self.obs_layer = nn.Sequential(
-            layer_init(nn.Conv2d(3, 32, 8, stride=4)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(1920, 512)),
-            nn.ReLU(),
-        )
-        
-        self.actor = layer_init( nn.Linear(512, action_space.n))
-        self.critic = layer_init(nn.Linear(512, 1))
-        
-    def get_value(self, x):
-        hidden = self.obs_layer(x / 255.0)#torch.permute(obs, (0, 3, 1, 2)))
-        value = self.critic(hidden)
-        return value
-        
-    def get_action_and_value(self, x, action=None):
-        hidden = self.obs_layer(x / 255.0)
-        logits = self.actor(hidden)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+# Anneal algorithm, I hate it
+# if anneal_lr:
+#             frac = 1.0 - (iteration - 1.0) / num_iterations
+#             lrnow = frac * learning_rate
+#             optimizer.param_groups[0]["lr"] = lrnow
 
-class PPOTrainer():
-    def __init__(self,
-                policy_network,
-                ppo_clip_val=0.2,
-                target_kl_div=0.01,
-                max_policy_train_iters=80,
-                value_train_iters=80,
-                policy_lr=3e-4,
-                value_lr=1e-2):
-        
-        self.policy = policy_network
-        self.ppo_clip_val = ppo_clip_val
-        self.target_kl_div = target_kl_div
-        self.max_policy_train_iters = max_policy_train_iters
-        self.value_train_iters = value_train_iters
-        
-        policy_params = list(self.policy.obs_layer.parameters()) + \
-            list(self.policy.actor.parameters())
-        self.policy_optimizer = optim.Adam(policy_params, lr=policy_lr)
-        
-        value_params = list(self.policy.obs_layer.parameters()) + \
-            list(self.policy.critic.parameters())
-        self.value_optimizer = optim.Adam(value_params, lr=value_lr)
-        
-    def train_policy(self, obs, acts, old_log_probs, gaes):
-        for _ in range(self.max_policy_train_iters):
-            self.policy_optimizer.zero_grad()
-            
-            new_logits = self.policy.action(obs)
-            new_logits = Categorical(logits=new_logits)
-            new_log_probs = new_logits.log_prob(acts)
-            
-            policy_ratio = torch.exp(new_log_probs - old_log_probs)
-            clipped_ratio = policy_ratio.clamp(1 - self.ppo_clip_val, 1 + self.ppo_clip_val)
-            
-            clipped_loss = clipped_ratio * gaes
-            full_loss = policy_ratio * gaes
-            policy_loss = -torch.min(full_loss, clipped_loss).mean()
-            
-            policy_loss.backward()
-            self.policy_optimizer.step()
-            
-            kl_div = (old_log_probs - new_log_probs).mean()
-            if kl_div >= self.target_kl_div: break
-        
-        
-    def train_value(self, obs, returns):
-        for _ in range(self.value_train_iters):
-            self.value_optimizer.zero_grad()
-            
-            values = self.policy.value(obs)
-            value_loss = (returns - values) ** 2
-            value_loss = value_loss.mean()
-            
-            value_loss.backward()
-            self.value_optimizer.step()
+class PPOSettings:
+    def __init__(self, num_minibatches=4, learning_rate=2.5e-4, update_epochs=4, ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, target_kl=None, norm_adv=True, clip_coef=0.2, clip_vloss=True):
+        self.num_minibatches = num_minibatches
+        self.learning_rate = learning_rate
+        self.update_epochs = update_epochs
+        self.ent_coef = ent_coef
+        self.vf_coef = vf_coef
+        self.max_grad_norm = max_grad_norm
+        self.target_kl = target_kl
 
-def obs_encoder(obs):
-    new_obs = {}
-    encoding = {}
-    
-    for i in range(len(obs)):
-        for agent in obs[i].keys():
-            if agent not in new_obs:
-                new_obs[agent] = []
-                encoding[agent] = []
-            
-            new_obs[agent].append(obs[i][agent])
-            encoding[agent] += [i]
-            
-    for agent in new_obs:
-        new_obs[agent] = torch.tensor(np.array(new_obs[agent]), dtype=torch.float32)
-        
-    return new_obs, encoding
+        self.norm_adv = norm_adv
+        self.clip_coef = clip_coef
+        self.clip_vloss = clip_vloss    
 
-def rollout(policies, env, max_steps=10):
-    #train_data = [[], [], [], [], []]
-    train_data = {} #This needs it's own class
-    ep_rewards = {}
-    
-    obs, _ = env.reset()
-    
-    nobs, encoding = obs_encoder(obs)
-    
-    for _ in range(max_steps):
-        actions = [{}] * env.num_envs
-        for agent in nobs.keys():
-            if agent not in train_data: 
-                train_data[agent] = [[], [], [], [], []]
-                ep_rewards[agent] = 0
+class PPOTrainer(Trainer):
+    def __init__(self, policy, settings: PPOSettings):
         
-            #ob = obs[agent] / 255.0
-            #logits, val = policies[agent](torch.tensor(np.array([ob]), dtype=torch.float32, device='cuda'))
-            logits, vals = policies[agent](nobs[agent])
-            act_distribution = Categorical(logits=logits)
-            acts = act_distribution.sample()
-            act_log_probs = act_distribution.log_prob(acts)#.item()
-            
-            #act = act.item()
-            #val = val.item()
-            # Decode the actions
-            actsi = acts.tolist()
-            assert len(actsi) == len(encoding[agent])
-            for i in encoding[agent]:
-                actions[i][agent] = actsi[i] 
-            
-            train_data[agent][0].append(nobs[agent].tolist())
-            train_data[agent][1].append(acts.tolist())
-            #train_data[agent][2].append(rew)
-            train_data[agent][3].append(vals.tolist())
-            train_data[agent][4].append(act_log_probs.tolist())
-            
-        next_obs, rewards, done, _, _ = env.step(actions)
+        self.policy = policy
+        self.settings = settings
+
+        self.optimizer = optim.Adam(policy.parameters(), lr=settings.learning_rate, eps=1e-5)
         
-        arewards = {}
-        for rew in rewards:
-            for agent in rew.keys():
-                if agent not in arewards:
-                    arewards[agent] = []
-                arewards[agent].append(rew[agent])
+    def train(self, obs, actions, action_log_probs, values, advantages, returns, batch_size, verbose=False):
+        
+        batch_size = batch_size
+        minibatch_size = batch_size // self.settings.num_minibatches
+        
+        #unnecessary since already permutating
+        iter_size = obs.shape[0]
+        b_inds = np.arange(iter_size)
+        for epoch in range(self.settings.update_epochs):
+            np.random.shuffle(b_inds)
+            for start in range(0, iter_size, minibatch_size):
+                end = start + minibatch_size
+                if end > iter_size:
+                    end = iter_size
+                mb_inds = b_inds[start:end]
+
+                _, newlogprob, entropy, newvalue = self.policy.get_action_and_value(obs[mb_inds], actions.long()[mb_inds])
+                logratio = newlogprob - action_log_probs[mb_inds]
+                ratio = logratio.exp()
+
+                with torch.no_grad():
+                    old_approx_kl = (-logratio).mean()
+                    approx_kl = ((ratio - 1) - logratio).mean()
                 
-        for agent in arewards.keys():
-            train_data[agent][2].append(arewards[agent])
-            ep_rewards[agent] += sum(arewards[agent])
-            
-        #obs = next_obs
-        nobs, encoding = obs_encoder(next_obs)
-        #print(done)
-        #if done: break
-        
-    #for agent in env.possible_agents:
-    #train_data = [np.asarray(x) for x in train_data]
-    
-    ### DO FILTERING!!!!
-    for agent in train_data.keys():
-        train_data[agent][3] = calculate_gaes(train_data[agent][2], train_data[agent][3])
-    
-    return train_data, ep_rewards
+                mb_advantages = advantages[mb_inds]
+                if self.settings.norm_adv:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-#deprecated
-def train(policies, env, n_episodes=2048, train_agents=None):
-    ppos = {}
-    ep_rewards = {}
-    
-    if train_agents is None: train_agents = env.agents
-    
-    for agent in train_agents:
-        #ep_rewards[agent] = []
-        ppos[agent] = PPOTrainer(
-            policies[agent],
-            policy_lr=1e-5,
-            value_lr=1e-3,
-            target_kl_div=0.02,
-            max_policy_train_iters=40,
-            value_train_iters=40)
+                # Policy loss
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.settings.clip_coef, 1 + self.settings.clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-    for episode_idx in range(n_episodes):
-        train_data, rewards = rollout(policies, env)
-        
-        for agent in train_data.keys(): #For every agent that was actually trained on
-            if agent not in ep_rewards: ep_rewards[agent] = []
-            ep_rewards[agent].append(rewards[agent])
-            
-            # Shuffle
-            permute_idxs = np.random.permutation(len(train_data[agent][0]))
-            
-            print(np.array(train_data[agent][1]))
-            
-            # Policy data
-            obs = torch.tensor(np.array(train_data[agent][0])[permute_idxs], dtype=torch.float32, device='cuda')
-            acts = torch.tensor(np.array(train_data[agent][1])[permute_idxs], dtype=torch.int32, device='cuda')
-            gaes = torch.tensor(np.array(train_data[agent][3])[permute_idxs], dtype=torch.float32, device='cuda')
-            act_log_probs = torch.tensor(np.array(train_data[agent][4])[permute_idxs], dtype=torch.float32, device='cuda')
-            
-            # Value data
-            returns =  (np.array(train_data[agent][2]))[permute_idxs]
-            returns = torch.tensor(returns, dtype=torch.float32, device='cuda')
-            
-            # Train model
-            ppos[agent].train_policy(obs, acts, act_log_probs, gaes)
-            ppos[agent].train_value(obs, returns)
-            
-        if (episode_idx + 1) % 1 == 0:
-            
-            print(f'~~~~~ Episode {episode_idx} ~~~~~')
-            
-            for agent in train_agents:
-                if agent not in ep_rewards: continue
-                rewards = np.mean(ep_rewards[agent][-1])
-                print(f'{agent} - Avg Reward = {rewards:.1f}')
+                # Value loss
+                newvalue = newvalue.view(-1)
+                if self.settings.clip_vloss:
+                    v_loss_unclipped = (newvalue - returns[mb_inds]) ** 2
+                    v_clipped = values[mb_inds] + torch.clamp(
+                        newvalue - values[mb_inds],
+                        -self.settings.clip_coef,
+                        self.settings.clip_coef
+                    )
+                    v_loss_clipped = (v_clipped - returns[mb_inds]) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+                else:
+                    v_loss = 0.5 * ((newvalue - returns[mb_inds]) ** 2).mean()
                 
-            print(f'~~~~~~~~~~~~~~~~~~~~')
+                entropy_loss = entropy.mean()
+                loss = pg_loss - self.settings.ent_coef * entropy_loss + v_loss * self.settings.vf_coef
+
+                # Train
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.settings.max_grad_norm)
+                self.optimizer.step()
+            
+            if self.settings.target_kl is not None and approx_kl > self.settings.target_kl:
+                break
         
-    
-    
+        if verbose:
+            print(f"value_loss: {v_loss.item()}")
+            print(f"policy_loss: {pg_loss.item()}")
+            print(f"entropy: {entropy_loss.item()}")
+            print(f"old_approx_kl: {old_approx_kl.item()}")
+            print(f"approx_kl: {approx_kl.item()}")
