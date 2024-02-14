@@ -83,7 +83,7 @@ class Emulator():
         self.frames = np.zeros((3, R // 2, C //2))
     
     def close(self):
-        pyboy.stop(save=False)
+        self.pyboy.stop(save=False)
         
     def run(self, action):
         # press button then release after some steps
@@ -121,11 +121,13 @@ class Emulator():
         self.frame_count += 1
     
     def save_state(self, filepath):
-        plt.imsave(Path(f'{filepath}.jpeg'), self.screen.screen_ndarray())
         with open(Path(f'{filepath}'), "wb") as f:
             self.pyboy.save_state(f)
-            
-    def get_frames():
+
+    def save_screenshot(self, filepath):
+        plt.imsave(Path(f'{filepath}.jpeg'), self.screen.screen_ndarray())
+
+    def get_frames(self):
         return self.frames
     '''
         print('', flush=True)
